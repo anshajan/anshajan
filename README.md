@@ -91,7 +91,10 @@ stack trace.
   returns `402` (not a silent failure) once a plan's quota is exhausted.
 - **Security headers & CORS**: `proxy.ts` sets CSP, `X-Frame-Options: DENY`,
   `X-Content-Type-Options: nosniff`, HSTS and a Permissions-Policy on every
-  response; `ALLOWED_ORIGINS` is a strict CORS allowlist enforced per API route.
+  response. A request's own origin (whatever domain it's actually deployed
+  on — production, a Vercel preview URL, a custom domain) is always allowed
+  automatically; `ALLOWED_ORIGINS` only needs to list *additional*, genuinely
+  separate origins that should be able to call this API cross-site.
 - **Stripe webhook** signature is verified against the raw request body
   before any event is trusted (`app/api/webhook/stripe/route.ts`).
 

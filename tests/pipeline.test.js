@@ -75,6 +75,25 @@ describe("security headers", () => {
 
     process.env.ALLOWED_ORIGINS = original;
   });
+
+  it("always allows the deployment's own origin, even when ALLOWED_ORIGINS doesn't list it", () => {
+    // Regression test: the first real deploy of this app 403'd on every
+    // same-site call because the production URL was never added to
+    // ALLOWED_ORIGINS. A request's own origin must always be trusted
+    // regardless of that env var.
+    const original = process.env.ALLOWED_ORIGINS;
+    process.env.ALLOWED_ORIGINS = "http://localhost:3000";
+
+    const deployedUrl = "https://anshajan-fgia.vercel.app/api/generate";
+    expect(isOriginAllowed("https://anshajan-fgia.vercel.app", deployedUrl)).toBe(true);
+    expect(corsHeadersFor("https://anshajan-fgia.vercel.app", deployedUrl)["Access-Control-Allow-Origin"]).toBe(
+      "https://anshajan-fgia.vercel.app"
+    );
+    // A genuinely different origin still isn't granted a free pass.
+    expect(isOriginAllowed("https://evil.example", deployedUrl)).toBe(false);
+
+    process.env.ALLOWED_ORIGINS = original;
+  });
 });
 
 describe("credit deduction (demo/anonymous mode)", () => {

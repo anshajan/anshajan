@@ -10,22 +10,27 @@ import { fetchPinterestReferences, PinterestError } from "@/lib/pinterest";
 
 export const runtime = "nodejs";
 
-function jsonError(status: number, message: string, origin: string | null) {
-  return NextResponse.json({ error: message }, { status, headers: corsHeadersFor(origin) });
+function jsonError(status: number, message: string, origin: string | null, requestUrl: string) {
+  return NextResponse.json(
+    { error: message },
+    { status, headers: corsHeadersFor(origin, requestUrl) }
+  );
 }
 
 export async function OPTIONS(req: Request) {
   const origin = req.headers.get("origin");
-  return new NextResponse(null, { status: 204, headers: corsHeadersFor(origin) });
+  return new NextResponse(null, { status: 204, headers: corsHeadersFor(origin, req.url) });
 }
 
 export async function POST(req: Request) {
   const origin = req.headers.get("origin");
 
   // CORS allowlist — reject cross-origin calls from hosts we didn't approve
-  // before doing any other work (credit-safe fail-fast).
-  if (!isOriginAllowed(origin)) {
-    return jsonError(403, "Origin not allowed.", origin);
+  // before doing any other work (credit-safe fail-fast). The deployment's
+  // own origin (prod, preview, or custom domain) is always allowed; see
+  // isOriginAllowed in lib/security/headers.ts for why.
+  if (!isOriginAllowed(origin, req.url)) {
+    return jsonError(403, "Origin not allowed.", origin, req.url);
   }
 
   // Every request is identified by authed user OR by IP for rate limiting
@@ -35,14 +40,14 @@ export async function POST(req: Request) {
 
   const { allowed } = await checkRateLimit(identifier);
   if (!allowed) {
-    return jsonError(429, "Too many requests. Please slow down and try again shortly.", origin);
+    return jsonError(429, "Too many requests. Please slow down and try again shortly.", origin, req.url);
   }
 
   let body: unknown;
   try {
     body = await req.json();
   } catch {
-    return jsonError(400, "Request body must be valid JSON.", origin);
+    return jsonError(400, "Request body must be valid JSON.", origin, req.url);
   }
 
   let parsed;
@@ -50,14 +55,14 @@ export async function POST(req: Request) {
     parsed = generateRequestSchema.parse(body);
   } catch (err) {
     if (err instanceof ZodError) {
-      return jsonError(400, err.issues[0]?.message ?? "Invalid request.", origin);
+      return jsonError(400, err.issues[0]?.message ?? "Invalid request.", origin, req.url);
     }
-    return jsonError(400, "Invalid request.", origin);
+    return jsonError(400, "Invalid request.", origin, req.url);
   }
 
   const sanitizedPrompt = sanitizePromptText(parsed.prompt);
   if (sanitizedPrompt.length < 3) {
-    return jsonError(400, "Prompt is empty after sanitization. Try a more descriptive prompt.", origin);
+    return jsonError(400, "Prompt is empty after sanitization. Try a more descriptive prompt.", origin, req.url);
   }
 
   // Credit check-and-deduct happens BEFORE any OpenAI/Pinterest call so a
@@ -68,7 +73,8 @@ export async function POST(req: Request) {
     return jsonError(
       402,
       "You've used all your free generations this month. Upgrade to continue.",
-      origin
+      origin,
+      req.url
     );
   }
 
@@ -87,7 +93,7 @@ export async function POST(req: Request) {
         aspectRatio: parsed.aspectRatio,
         credits: { tier: credit.tier, remaining: credit.remainingAfter },
       },
-      { headers: corsHeadersFor(origin) }
+      { headers: corsHeadersFor(origin, req.url) }
     );
   } catch (err) {
     // Pipeline failed after the credit was spent — refund it rather than
@@ -99,7 +105,7 @@ export async function POST(req: Request) {
         err.code === "rate_limited"
           ? "Pinterest is rate-limiting us right now. Please try again in a minute."
           : "Couldn't fetch Pinterest references right now. Please try again shortly.";
-      return jsonError(503, msg, origin);
+      return jsonError(503, msg, origin, req.url);
     }
     if (err instanceof OpenAiError) {
       const msg =
@@ -108,10 +114,10 @@ export async function POST(req: Request) {
           : err.code === "rate_limited"
           ? "We're generating a lot of posters right now — please try again in a minute."
           : "Poster generation failed. Please try again.";
-      return jsonError(503, msg, origin);
+      return jsonError(503, msg, origin, req.url);
     }
 
     console.error("[/api/generate] unexpected error", err);
-    return jsonError(500, "Something went wrong generating your poster.", origin);
+    return jsonError(500, "Something went wrong generating your poster.", origin, req.url);
   }
 }

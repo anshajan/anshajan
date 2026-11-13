@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { generateRequestSchema, sanitizePromptText } from "../lib/security/schemas";
 import { SECURITY_HEADERS, isOriginAllowed, corsHeadersFor } from "../lib/security/headers";
-import { deductCredit, TIER_LIMITS } from "../lib/credits";
+import { deductCredit, refundCredit, TIER_LIMITS } from "../lib/credits";
 import { fetchPinterestReferences } from "../lib/pinterest";
 
 describe("request validation (Zod)", () => {
@@ -110,6 +110,25 @@ describe("credit deduction (demo/anonymous mode)", () => {
     const result = await deductCredit(null, key);
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("no_credits");
+  });
+
+  it("refunds an anonymous credit so a failed generation doesn't permanently burn it", async () => {
+    // Regression test: refundCredit was a no-op for the anonymous/demo path
+    // (it only handled Supabase-backed users), so any pipeline failure after
+    // the deduction — including ones entirely outside the user's control,
+    // like an upstream provider's billing/quota limitation — permanently
+    // cost one of the 3 free monthly credits with no way to get it back.
+    const refundKey = `refund-test-${Math.random()}`;
+
+    for (let i = 0; i < TIER_LIMITS.free.monthlyCredits; i++) {
+      expect((await deductCredit(null, refundKey)).ok).toBe(true);
+    }
+    expect((await deductCredit(null, refundKey)).ok).toBe(false); // exhausted
+
+    await refundCredit(null, refundKey);
+
+    const afterRefund = await deductCredit(null, refundKey);
+    expect(afterRefund.ok).toBe(true); // the refunded credit is usable again
   });
 });
 

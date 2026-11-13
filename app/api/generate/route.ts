@@ -5,7 +5,7 @@ import { checkRateLimit, clientIdentifierFromRequest } from "@/lib/security/rate
 import { corsHeadersFor, isOriginAllowed } from "@/lib/security/headers";
 import { getAuthedUser } from "@/lib/security/auth";
 import { deductCredit, refundCredit } from "@/lib/credits";
-import { extractKeywords, analyzeReferenceStyle, generatePoster, OpenAiError } from "@/lib/openai";
+import { extractKeywords, analyzeReferenceStyle, generatePoster, activeProvider, AiProviderError } from "@/lib/aiProvider";
 import { fetchPinterestReferences, PinterestError } from "@/lib/pinterest";
 
 export const runtime = "nodejs";
@@ -91,6 +91,7 @@ export async function POST(req: Request) {
         style,
         posterUrl,
         aspectRatio: parsed.aspectRatio,
+        provider: activeProvider(),
         credits: { tier: credit.tier, remaining: credit.remainingAfter },
       },
       { headers: corsHeadersFor(origin, req.url) }
@@ -98,7 +99,7 @@ export async function POST(req: Request) {
   } catch (err) {
     // Pipeline failed after the credit was spent — refund it rather than
     // charging the user for a generation they never received.
-    await refundCredit(user?.id ?? null);
+    await refundCredit(user?.id ?? null, identifier);
 
     if (err instanceof PinterestError) {
       const msg =
@@ -107,12 +108,14 @@ export async function POST(req: Request) {
           : "Couldn't fetch Pinterest references right now. Please try again shortly.";
       return jsonError(503, msg, origin, req.url);
     }
-    if (err instanceof OpenAiError) {
+    if (err instanceof AiProviderError) {
       const msg =
         err.code === "timeout"
           ? "Poster generation timed out. Please try again."
           : err.code === "rate_limited"
           ? "We're generating a lot of posters right now — please try again in a minute."
+          : err.code === "quota_exceeded"
+          ? "Image generation isn't enabled on this AI plan yet — check your provider's billing/plan settings."
           : "Poster generation failed. Please try again.";
       return jsonError(503, msg, origin, req.url);
     }

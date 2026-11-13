@@ -21,19 +21,41 @@ export async function fetchPinterestReferences(
   const base = process.env.PINTEREST_API_BASE ?? "https://api.pinterest.com/v5";
   const query = encodeURIComponent(keywords.join(" "));
 
-  const res = await fetch(`${base}/search/pins?query=${query}&page_size=5`, {
-    headers: {
-      Authorization: `Bearer ${process.env.PINTEREST_ACCESS_TOKEN}`,
-    },
-    // Pinterest responses are personalized per search; never cache across users.
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${base}/search/pins?query=${query}&page_size=5`, {
+      headers: {
+        Authorization: `Bearer ${process.env.PINTEREST_ACCESS_TOKEN}`,
+      },
+      // Pinterest responses are personalized per search; never cache across users.
+      cache: "no-store",
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    console.warn(`[pinterest] network error, falling back to demo references: ${err}`);
+    return demoReferencePins(keywords);
+  }
 
   if (!res.ok) {
-    throw new PinterestError(
-      `Pinterest API returned ${res.status}`,
-      res.status === 429 ? "rate_limited" : "upstream_error"
+    if (res.status === 429) {
+      // Transient and user-actionable ("try again shortly") — worth
+      // surfacing rather than hiding behind a silent fallback.
+      throw new PinterestError(`Pinterest API returned ${res.status}`, "rate_limited");
+    }
+
+    // Anything else (401/403/404/5xx) is an app-level or account-level
+    // problem the user can't fix by retrying — e.g. this integration hit
+    // "Your application consumer type is not supported" on every v5
+    // endpoint while building this, which means the Pinterest app itself
+    // isn't approved for live API access yet. Pinterest references are an
+    // enrichment, not the core feature, so a misconfigured/unapproved app
+    // should degrade to demo references rather than break poster
+    // generation entirely. Logged server-side so it's still diagnosable.
+    const body = await res.text().catch(() => "");
+    console.warn(
+      `[pinterest] API call failed (${res.status}), falling back to demo references: ${body.slice(0, 300)}`
     );
+    return demoReferencePins(keywords);
   }
 
   const json = await res.json();

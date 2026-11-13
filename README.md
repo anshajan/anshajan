@@ -2,7 +2,8 @@
 
 AI-powered Pinterest-to-Poster SaaS studio. Type a prompt → anshaj extracts
 visual keywords, fetches top-performing Pinterest references, analyzes their
-style with GPT-4o Vision, and generates a poster with DALL-E 3.
+style, and generates a poster — via Google Gemini or OpenAI, whichever you
+configure.
 
 ## Quick start
 
@@ -11,25 +12,51 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000. **No API keys are required to try it** — with
-`OPENAI_API_KEY` / `PINTEREST_ACCESS_TOKEN` unset, every step of the pipeline
-runs in **demo mode** against realistic fixtures (`lib/demoData.ts`), so the
-full UX — prompt → keyword extraction → Pinterest references → style
-analysis → poster → download — works end to end out of the box.
+Open http://localhost:3000. **No API keys are required to try it** — with no
+AI/Pinterest keys set, every step of the pipeline runs in **demo mode**
+against realistic fixtures (`lib/demoData.ts`), so the full UX — prompt →
+keyword extraction → Pinterest references → style analysis → poster →
+download — works end to end out of the box.
 
 ## Going live
 
 Copy `.env.example` to `.env.local` and fill in the keys you want to enable.
 Each integration activates independently and the app degrades gracefully if
-one is missing:
+one is missing or fails:
 
 | Variable | Enables |
 |---|---|
-| `OPENAI_API_KEY` | Real keyword extraction, GPT-4o Vision style analysis, DALL-E 3 posters |
-| `PINTEREST_ACCESS_TOKEN` | Real Pinterest API v5 reference search |
+| `GEMINI_API_KEY` | Keyword extraction + vision style analysis + poster generation via Google Gemini (used first if set — see `lib/aiProvider.ts`) |
+| `OPENAI_API_KEY` | Same pipeline via GPT-4o-mini / GPT-4o Vision / DALL-E 3, used only if `GEMINI_API_KEY` is unset |
+| `PINTEREST_ACCESS_TOKEN` | Real Pinterest API v5 reference search (falls back to demo references on any non-rate-limit failure — see "Real-world findings" below) |
 | `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | Auth, persistent per-user credits, saved posters |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` / price IDs | Subscription checkout and tier upgrades |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Shared, multi-instance rate limiting (otherwise falls back to in-memory, single-instance limiting) |
+
+### Real-world findings (from actually testing live credentials)
+
+- **Gemini image generation needs billing enabled.** Every Gemini
+  image-output model (`gemini-3.1-flash-image`, `gemini-2.5-flash-image`,
+  etc.) returns HTTP 429 with `limit: 0` on the Generative Language API's
+  free tier — confirmed directly against Google's API, not a guess. Text
+  and vision calls work fine on the free tier; only the final image-gen
+  step needs a Google Cloud project with billing attached to the API key
+  (https://aistudio.google.com/apikey → link/enable billing).
+- **A fresh Pinterest app is commonly not approved for live v5 calls.**
+  Confirmed directly: a real app ID + access token returned 401
+  `"Your application consumer type is not supported, please contact
+  support."` on *every* v5 endpoint tested, including the most basic
+  `/v5/user_account`. This means the Pinterest app itself hasn't cleared
+  Pinterest's review/approval for production API access yet — check your
+  app's status in the Pinterest Developer Portal. Until it's approved,
+  `/api/generate` automatically falls back to demo Pinterest references
+  rather than breaking poster generation (Pinterest data is an enrichment,
+  not the core feature).
+- **Gemini model names churn fast.** While building this integration,
+  `gemini-2.5-flash` returned 404 "no longer available to new users" for a
+  brand-new key. `GEMINI_TEXT_MODEL`/`GEMINI_IMAGE_MODEL` default to
+  Google's `-latest` aliases rather than a pinned snapshot specifically to
+  absorb this kind of churn without a code change.
 
 Run `supabase/schema.sql` against your Supabase project (SQL editor or
 `supabase db push`) to create `profiles`/`posters`, the row-level security
@@ -45,15 +72,16 @@ and point a webhook endpoint at `/api/webhook/stripe` listening for
 ```
 app/
   page.tsx                 Landing page (nav, hero, how-it-works, studio, pricing, security)
-  api/generate/route.ts     Core pipeline: validate -> rate-limit -> deduct credit -> Pinterest -> GPT-4o Vision -> DALL-E 3
+  api/generate/route.ts     Core pipeline: validate -> rate-limit -> deduct credit -> Pinterest -> AI provider
   api/checkout/route.ts     Stripe Checkout session creation
   api/webhook/stripe/route.ts  Stripe webhook (signature-verified) -> tier/credit updates
 components/                 Landing page sections + the Live Poster Studio UI
 lib/
-  openai.ts, pinterest.ts   Provider integrations, each with a demo-mode fallback
+  aiProvider.ts             Picks Gemini vs OpenAI vs demo and normalizes their errors (route.ts imports only this)
+  gemini.ts, openai.ts, pinterest.ts   Provider integrations, each with a demo-mode fallback
   credits.ts                Atomic credit check-and-deduct (Supabase RPC) + anonymous demo quota
-  security/                 Zod schemas, prompt sanitization, rate limiting, auth, headers/CORS
-  demoData.ts               Sandbox fixtures used whenever API keys are absent
+  security/                 Zod schemas, prompt sanitization (shared via promptSafety.ts), rate limiting, auth, headers/CORS
+  demoData.ts               Sandbox fixtures used whenever no AI/Pinterest keys are set
 proxy.ts                     Applies CSP/X-Frame-Options/HSTS/etc. to every response (Next.js 16's `proxy` convention, formerly `middleware.ts`)
 supabase/schema.sql          profiles/posters tables, RLS policies, deduct_credit/refund_credit RPCs
 tests/pipeline.test.js       Vitest suite: validation, sanitization, headers, credits, demo fallback
@@ -67,8 +95,12 @@ tests/pipeline.test.js       Vitest suite: validation, sanitization, headers, cr
 3. A credit is **atomically checked-and-deducted** before any paid API call —
    this is a single conditional database update, so two concurrent requests
    can never both slip through on the last credit.
-4. GPT-4o-mini extracts keywords → Pinterest API v5 fetches references →
-   GPT-4o Vision analyzes their style → DALL-E 3 generates the poster.
+4. `lib/aiProvider.ts` extracts keywords → Pinterest API v5 fetches references
+   (or falls back to demo ones) → the AI provider (Gemini or OpenAI) analyzes
+   their style → the same provider generates the poster. Gemini's image
+   models return inline base64 data, exposed as a `posterUrl` that's a
+   `data:` URI; OpenAI/demo return a hosted URL — the frontend treats both
+   as an opaque string.
 5. If any step after the credit deduction fails, the credit is refunded —
    users are never charged for a generation they didn't receive.
 
@@ -78,9 +110,10 @@ stack trace.
 
 ## Security
 
-- **No secrets reach the browser.** `OPENAI_API_KEY` and
+- **No secrets reach the browser.** `GEMINI_API_KEY`, `OPENAI_API_KEY`, and
   `PINTEREST_ACCESS_TOKEN` are read only inside server-side modules
-  (`lib/openai.ts`, `lib/pinterest.ts`), never in a `"use client"` file.
+  (`lib/gemini.ts`, `lib/openai.ts`, `lib/pinterest.ts`), never in a
+  `"use client"` file.
 - **Rate limiting**: token-bucket per identity, Redis-backed when
   `UPSTASH_REDIS_REST_URL` is set, in-memory otherwise (`lib/security/rateLimit.ts`).
 - **Input validation & prompt-injection defense**: strict Zod schemas reject

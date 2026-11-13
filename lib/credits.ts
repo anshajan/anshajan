@@ -75,9 +75,21 @@ export async function deductCredit(
   return { ok: true, remainingAfter: row.remaining, tier: row.tier };
 }
 
-/** Refunds a credit if the pipeline fails after the deduction succeeded. */
-export async function refundCredit(userId: string | null): Promise<void> {
-  if (!userId || !hasSupabaseAdmin()) return;
+/**
+ * Refunds a credit if the pipeline fails after the deduction succeeded.
+ * Mirrors deductCredit's two paths — this was previously a no-op for the
+ * anonymous/demo path (missing the matching anonymousUsage decrement),
+ * which meant a failed generation permanently burned one of a user's 3
+ * free credits even for failures entirely outside their control (e.g. an
+ * upstream provider's billing/quota limitation). Confirmed live while
+ * testing a real Gemini billing-quota failure.
+ */
+export async function refundCredit(userId: string | null, anonymousKey: string): Promise<void> {
+  if (!userId || !hasSupabaseAdmin()) {
+    const used = anonymousUsage.get(anonymousKey) ?? 0;
+    anonymousUsage.set(anonymousKey, Math.max(0, used - 1));
+    return;
+  }
   const supabase = supabaseAdmin();
   await supabase.rpc("refund_credit", { p_user_id: userId });
 }

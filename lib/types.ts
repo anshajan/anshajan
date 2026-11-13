@@ -10,5 +10,6 @@ export type GenerateResponse = {
   };
   posterUrl: string;
   aspectRatio: "1:1" | "4:5" | "9:16";
+  provider: "gemini" | "openai" | "demo";
   credits: { tier: "free" | "creator" | "agency"; remaining: number };
 };
